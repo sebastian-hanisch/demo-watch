@@ -1,0 +1,56 @@
+name: Python canary
+
+# Liegt im oeffentlichen Repo sebastian-hanisch/demo-watch (kostenlose Actions-Minuten); Quelle: tools/watch_repo/ im Website-Repo.
+# Wöchentlicher Lauf einiger Sentinel-Demos auf neueren Python-Versionen als in der Demo-CI (dort 3.12; lokal laeuft
+# der Rechner bereits mit 3.14). Faengt Versionsdrift frueh ab (entfernte Standardbibliotheks-Funktionen, geaenderte
+# Wheels, Syntax-/Warnungsaenderungen), bevor er alle Demos gleichzeitig trifft. Die Sentinels sind bewusst klein und
+# frei von OR-Tools/PyTorch (fuer die gibt es auf einer neuen Python-Version oft erst spaeter Wheels, das waere Dauerrauschen).
+# Ein Fehlschlag legt ein Issue an (nur eines, schliesst sich bei gruenem Lauf); die Demo-Repos selbst bleiben unberuehrt.
+on:
+  schedule:
+    - cron: "17 6 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+        demo: [kruskal-demo, shapley-demo, dinic-demo, johnson-demo, bellman-ford-demo]
+    steps:
+      - name: Demo auschecken
+        uses: actions/checkout@v7
+        with:
+          repository: sebastian-hanisch/${{ matrix.demo }}
+
+      - name: Python einrichten
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+
+      - name: Abhängigkeiten installieren
+        run: pip install -r requirements-dev.txt
+
+      - name: Tests ausführen
+        run: python -m pytest tests/ -q -p no:cacheprovider
+
+  alert:
+    needs: canary
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Bei Fehler Issue anlegen, bei Erfolg schließen
+        uses: ./.github/actions/alert
+        with:
+          title: "Python-Canary: Sentinel-Demo auf neuer Python-Version rot"
+          status: ${{ needs.canary.result }}
+          token: ${{ github.token }}

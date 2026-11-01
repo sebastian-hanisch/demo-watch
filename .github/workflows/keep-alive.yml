@@ -1,0 +1,64 @@
+name: Keep demos awake
+
+# Liegt im oeffentlichen Repo sebastian-hanisch/demo-watch (dort sind Actions-Minuten kostenlos, im privaten Website-Repo nicht).
+# Quelle der Datei: tools/watch_repo/ im Website-Repo, Abgleich mit `python tools/sync_watch_repo.py`.
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  visit-demos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Install Playwright package
+        run: npm install playwright@1.62.1
+      - name: Cache Chromium binary
+        id: cache-chromium
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-1.62.1
+      # Deliberately skipping "--with-deps"/"install-deps" (the apt-get step)
+      # here: ubuntu-latest ships most of Chromium's required shared libs
+      # already, and that apt step was the remaining slow part every run
+      # regardless of the binary cache. If chromium.launch() starts failing
+      # with a missing-library error in the next run's log, that's the
+      # signal this bet didn't pay off and install-deps needs to come back.
+      - name: Install Chromium
+        if: steps.cache-chromium.outputs.cache-hit != 'true'
+        run: npx playwright install chromium
+      - name: Visit every demo
+        # tee behält das Protokoll für das Issue (bash läuft mit pipefail: ein Fehlschlag des Skripts bleibt einer)
+        env:
+          # Die Adressen stehen auf diesen Seiten der Website (genau die Liste DEMO_URLS des Skripts)
+          KEEP_ALIVE_URLS_FROM: https://sebastianhanisch.net/demos.html,https://sebastianhanisch.net/suche-index.json
+        run: node .github/scripts/keep-alive.mjs 2>&1 | tee keep-alive.log
+
+      - name: Betroffene Demos für das Issue zusammenstellen
+        if: always()
+        run: |
+          # je Adresse die letzte FAIL-Zeile (die Wiederholungsdurchgänge schreiben sie mehrfach), ohne Präfix und Suffix der Adresse
+          if [ -f keep-alive.log ]; then
+            grep '^FAIL ' keep-alive.log | tac | awk '!seen[$2]++' | tac \
+              | sed -E 's#https://sebastianhanisch-##; s#\.streamlit\.app/##' | cut -c1-220 > keep-alive-details.txt || true
+          fi
+          touch keep-alive-details.txt
+
+      - name: Bei Fehler Issue anlegen, bei Erfolg schließen
+        if: always()
+        uses: ./.github/actions/alert
+        with:
+          title: "Keep-alive: Demo nicht erreichbar"
+          status: ${{ job.status }}
+          token: ${{ github.token }}
+          details-file: keep-alive-details.txt

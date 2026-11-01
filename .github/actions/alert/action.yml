@@ -1,0 +1,57 @@
+name: Alert per Issue
+description: >
+  Legt bei einem fehlgeschlagenen Lauf ein GitHub-Issue an (nur eines pro Titel, keine Wiederholung
+  bei jedem weiteren Fehlschlag) und schliesst es automatisch, sobald der Lauf wieder gruen ist.
+  GitHub benachrichtigt per E-Mail ueber neue Issues. Mit "details-file" steht im Issue, was genau
+  betroffen ist (z. B. die Demos, die nicht liefen); bei einem bereits offenen Issue wird dessen Text
+  mit dem aktuellen Stand ersetzt, ohne einen weiteren Eintrag. Voraussetzung im Workflow:
+  "permissions: issues: write" und ein vorheriger checkout-Schritt.
+inputs:
+  title:
+    description: Titel des Issues (dient zugleich als Schluessel)
+    required: true
+  status:
+    description: Ergebnis des Jobs (job.status)
+    required: true
+  token:
+    description: GitHub-Token
+    required: true
+  details-file:
+    description: Textdatei mit den betroffenen Eintraegen (optional, wird gekuerzt in das Issue uebernommen)
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        TITLE: ${{ inputs.title }}
+        STATUS: ${{ inputs.status }}
+        DETAILS_FILE: ${{ inputs.details-file }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        set -euo pipefail
+        existing=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
+          --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
+        if [ "$STATUS" = "failure" ]; then
+          details=""
+          if [ -n "$DETAILS_FILE" ] && [ -s "$DETAILS_FILE" ]; then
+            details=$(head -c 3500 "$DETAILS_FILE")
+          fi
+          body=$(printf 'Der automatische Lauf ist fehlgeschlagen: %s\n' "$RUN_URL")
+          if [ -n "$details" ]; then
+            body=$(printf '%s\n\nBetroffen:\n\n```\n%s\n```' "$body" "$details")
+          fi
+          body=$(printf '%s\n\nDas Issue schließt sich von selbst, sobald ein Lauf wieder erfolgreich ist.' "$body")
+          if [ -z "$existing" ]; then
+            gh issue create --title "$TITLE" --body "$body"
+          elif [ -n "$details" ]; then
+            gh issue edit "$existing" --body "$body"
+            echo "Issue #$existing ist bereits offen - Text auf den aktuellen Stand gebracht."
+          else
+            echo "Issue #$existing ist bereits offen - kein weiterer Eintrag."
+          fi
+        elif [ "$STATUS" = "success" ] && [ -n "$existing" ]; then
+          gh issue close "$existing" --comment "Wieder in Ordnung: $RUN_URL"
+        fi
