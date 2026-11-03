@@ -14,7 +14,8 @@ permissions:
 jobs:
   visit-demos:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Ein Lauf, in dem alle ~620 Demos schlafen, braucht gut 2 Stunden (am 2026-11-03 brach er nach 60 Minuten bei 308 ab)
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
