@@ -4,7 +4,7 @@ name: Keep demos awake
 # Quelle der Datei: tools/watch_repo/ im Website-Repo, Abgleich mit `python tools/sync_watch_repo.py`.
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "17 */3 * * *"
   workflow_dispatch:
 
 permissions:
