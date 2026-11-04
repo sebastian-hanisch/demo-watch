@@ -4,9 +4,8 @@ name: Keep demos awake
 # Quelle der Datei: tools/watch_repo/ im Website-Repo, Abgleich mit `python tools/sync_watch_repo.py`.
 on:
   schedule:
-    - cron: "17 */3 * * *"
-    # zweiter, versetzter Auslöser: GitHub lässt geplante Läufe unter Last aus (2026-11-03: 13 Stunden Pause, danach schliefen die Demos)
-    - cron: "47 1,7,13,19 * * *"
+    # alle 6 Stunden zur Minute 17 (nicht zur vollen Stunde: dort lässt GitHub geplante Läufe eher aus); die Cloud schläft nach 12 Stunden
+    - cron: "17 */6 * * *"
   workflow_dispatch:
 
 # Läufe nacheinander statt überlappend: ein Kaltstart-Lauf dauert über 2 Stunden und würde sonst mit dem nächsten dieselben Demos aufwecken
