@@ -50,6 +50,8 @@ jobs:
         env:
           # Die Adressen stehen auf diesen Seiten der Website (genau die Liste DEMO_URLS des Skripts)
           KEEP_ALIVE_URLS_FROM: https://sebastianhanisch.net/demos.html,https://sebastianhanisch.net/suche-index.json
+          # Nach 240 Minuten keine neuen Demos mehr beginnen: der Lauf endet dann mit Protokoll und Issue, statt nach 300 Minuten vom Job-Limit abgebrochen zu werden
+          KEEP_ALIVE_BUDGET_MIN: "240"
         run: node .github/scripts/keep-alive.mjs 2>&1 | tee keep-alive.log
 
       - name: Betroffene Demos für das Issue zusammenstellen

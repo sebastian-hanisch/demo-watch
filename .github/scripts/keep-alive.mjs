@@ -613,28 +613,63 @@ const SHELL_TIMEOUT_MS = Number.parseInt(process.env.KEEP_ALIVE_SHELL_TIMEOUT_MS
 // ("Yes, get this app back up!" historically) in case the wording does.
 const WAKE_BUTTON_PATTERN = /get this app back up|wake.*app/i;
 
-async function findWakeButton(page) {
+// Die Schlafseite braucht nach domcontentloaded 3 bis 4 s, bis der Knopf da ist (gemessen 2026-11-04: nach 1 s leer, nach 4 s da), unter
+// Last in der CI länger. Ein festes Warten von 4 s verpasste ihn deshalb: der Besuch lief dann 150 s auf einen App-Rahmen, den eine
+// schlafende App nie liefert (2026-11-03/04: 448 von 452 Besuchen, kein einziges OK, Läufe über 5 Stunden, schlafende Demos nie geweckt).
+// Jetzt wird auf Knopf ODER App-Rahmen gewartet, was zuerst kommt; bleibt beides aus, wird die Seite neu geladen (siehe bringUp).
+const SETTLE_MS = Number.parseInt(process.env.KEEP_ALIVE_SETTLE_MS ?? "", 10) || 45_000;
+const MAX_RELOADS = 1;
+
+async function appFrameNow(page) {
+  const frames = page.frames();
+  const ordered = [...frames.filter((f) => f !== page.mainFrame()), page.mainFrame()];
+  for (const frame of ordered) {
+    try {
+      if ((await frame.locator('[data-testid="stAppViewContainer"]').count()) > 0) return frame;
+    } catch {
+      // Frame ist gerade weg oder lädt neu - nächster Kandidat
+    }
+  }
+  return null;
+}
+
+async function wakeButtonNow(page) {
   const candidates = [
     page.getByRole("button", { name: WAKE_BUTTON_PATTERN }).first(),
     page.frameLocator('iframe[title="streamlitApp"]').getByRole("button", { name: WAKE_BUTTON_PATTERN }).first(),
   ];
   for (const btn of candidates) {
-    // locator.isVisible() is a point-in-time check - despite the `timeout`
-    // option it does NOT poll/wait for the element to become visible, it
-    // just checks whatever is in the DOM right now and returns instantly.
-    // Right after domcontentloaded, a couple of demos' sleep screens
-    // consistently weren't rendered yet at that exact instant, so this
-    // silently and permanently "found nothing" every single run for those
-    // two specific demos - not flaky, just always losing the same race.
-    // waitFor({state: "visible"}) actually polls up to the timeout.
     try {
-      await btn.waitFor({ state: "visible", timeout: 4_000 });
-      return btn;
+      if (await btn.isVisible()) return btn;
     } catch {
-      // not visible within the timeout - try the next candidate
+      // Seite lädt gerade neu - beim nächsten Durchlauf erneut
     }
   }
   return null;
+}
+
+// Wartet höchstens timeoutMs auf das, was zuerst erscheint: { kind: "app", frame } oder { kind: "asleep", button }; null bei Zeitablauf.
+async function waitForWakeOrApp(page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const frame = await appFrameNow(page);
+    if (frame) return { kind: "app", frame };
+    const button = await wakeButtonNow(page);
+    if (button) return { kind: "asleep", button };
+    await page.waitForTimeout(500);
+  } while (Date.now() < deadline);
+  return null;
+}
+
+// Die Status-Schnittstelle der Cloud nennt den Zustand der App (beobachtet 2026-11-04: 12 = schläft, 5 = läuft); nur für die Fehlermeldung.
+async function appStatus(url) {
+  try {
+    const res = await fetch(`${url}api/v2/app/status`, { signal: AbortSignal.timeout(10_000) });
+    const m = (await res.text()).match(/"status":(\d+)/);
+    return m ? m[1] : `HTTP ${res.status}`;
+  } catch {
+    return "keine Antwort";
+  }
 }
 
 // Ergebnis eines Besuchs: { ok: true } oder { ok: false, kind, detail }. kind "skriptfehler" (die App zeigt eine Fehlerbox) und
@@ -642,24 +677,35 @@ async function findWakeButton(page) {
 // kommt in die Wiederholungsdurchgänge, denn ein langsamer Kaltstart sieht genauso aus.
 const FINAL_KINDS = new Set(["skriptfehler", "nicht-gefunden"]);
 
-// Streamlit rendert die App auf *.streamlit.app in einem Unter-Frame (iframe title="streamlitApp"): Fehlerbox und App-Container
-// stehen im Dokument des Frames, nicht der Hauptseite. Gesucht wird über page.frames() (der Rahmen kann später als die Hauptseite
-// auftauchen oder nach einem Reboot ersetzt werden); die Hauptseite zählt mit, falls eine App direkt eingebettet ist.
-async function findAppFrame(page, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
+// Bringt die Seite bis zu einem App-Rahmen mit stAppViewContainer: schlafende Apps wecken (Knopf klicken, dann auf den Kaltstart warten,
+// höchstens SHELL_TIMEOUT_MS insgesamt), bei Stillstand einmal neu laden. Streamlit rendert die App in einem Unter-Frame
+// (iframe title="streamlitApp"); der Rahmen kann später als die Hauptseite auftauchen oder nach einem Reboot ersetzt werden.
+// Neu laden hilft auch gegen einen Hänger der Cloud: einzelne Frontend-Dateien (JS-Chunks) antworten dort mitunter erst nach 40 bis
+// 60 s mit HTTP 500, der Rahmen bleibt dann leer; beim nächsten Laden kommen dieselben Dateien sofort (gemessen 2026-11-04).
+async function bringUp(page, url) {
+  const deadline = Date.now() + SHELL_TIMEOUT_MS;
+  let clicks = 0;
+  let reloads = 0;
   while (Date.now() < deadline) {
-    const frames = page.frames();
-    const ordered = [...frames.filter((f) => f !== page.mainFrame()), page.mainFrame()];
-    for (const frame of ordered) {
-      try {
-        if ((await frame.locator('[data-testid="stAppViewContainer"]').count()) > 0) return frame;
-      } catch {
-        // Frame ist gerade weg oder lädt neu - nächster Kandidat
-      }
+    const window = Math.min(clicks > 0 ? 90_000 : SETTLE_MS, deadline - Date.now());
+    const seen = await waitForWakeOrApp(page, window);
+    if (seen?.kind === "app") return seen.frame;
+    if (seen?.kind === "asleep") {
+      if (clicks >= 3) break;
+      clicks++;
+      console.log(`  -> asleep, clicking wake button (${clicks}): ${url}`);
+      await seen.button.click();
+      console.log(`  -> wake button clicked, waiting for reboot: ${url}`);
+      await page.waitForLoadState("load", { timeout: 45_000 }).catch(() => {});
+      continue;
     }
-    await page.waitForTimeout(500);
+    if (reloads >= MAX_RELOADS) break;
+    reloads++;
+    console.log(`  -> neither wake button nor app frame after ${Math.round(window / 1000)}s, reloading: ${url}`);
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 }).catch(() => {});
   }
-  throw new Error(`Timeout ${timeoutMs}ms exceeded: kein App-Rahmen mit stAppViewContainer gefunden`);
+  const state = clicks > 0 ? `nach ${clicks}x Wecken` : "ohne Wecken-Knopf";
+  throw new Error(`Timeout: kein App-Rahmen mit stAppViewContainer gefunden (${state}, ${reloads}x neu geladen, Status der App: ${await appStatus(url)})`);
 }
 
 // Bis ans Ende scrollen: Fehlerboxen unter einem Expander oder weit unten stehen erst nach dem Rendern, Inhalte folgen lazy.
@@ -728,25 +774,9 @@ async function visit(context, url) {
       return { ok: false, kind: "nicht-gefunden", detail: "App existiert nicht (HTTP 404 bzw. errors/not_found)" };
     }
 
-    const wakeButton = await findWakeButton(page);
-    if (wakeButton) {
-      console.log(`  -> asleep, clicking wake button: ${url}`);
-      await wakeButton.click();
-      console.log(`  -> wake button clicked, waiting for reboot: ${url}`);
-      await page.waitForLoadState("load", { timeout: 45_000 }).catch(() => {});
-    } else {
-      // Logged explicitly rather than silently - if this line shows up for a
-      // demo that then fails below, the button genuinely wasn't found/clicked
-      // (a real bug in the selector or a bot-detection block), which is a
-      // different problem than "clicked fine, just booted too slowly".
-      console.log(`  -> no wake button found (already awake, or not detected): ${url}`);
-    }
-
-    // Streamlit Cloud embeds the actual app in an iframe (title="streamlitApp") -
-    // the app shell container lives inside that frame's document, not the top page.
-    // A cold boot (heavier demos - e.g. OR-Tools/CP-SAT imports - especially so)
-    // can take well over a minute, so this is deliberately generous.
-    const appFrame = await findAppFrame(page, SHELL_TIMEOUT_MS);
+    // Weckt eine schlafende App und wartet auf den App-Rahmen; ein Kaltstart (schwere Demos, z. B. OR-Tools/CP-SAT-Importe) kann weit über
+    // eine Minute dauern, deshalb ist das Limit großzügig.
+    const appFrame = await bringUp(page, url);
     const statusWidget = appFrame.locator('[data-testid="stStatusWidget"]');
 
     // The app shell renders even when the script itself crashed (ImportError,
@@ -800,6 +830,12 @@ async function mapWithConcurrency(items, limit, worker) {
 // removes that contention as a variable for whichever demos are already
 // struggling.
 const CONCURRENCY = 4;
+// KEEP_ALIVE_BUDGET_MIN=<Minuten>: nach dieser Zeit werden keine neuen Demos mehr begonnen und keine Wiederholungsdurchgänge mehr
+// gestartet; was dann noch offen ist, steht als Fehler mit Hinweis im Protokoll. So endet ein Lauf mit Ergebnis (und Issue) statt vom
+// Zeitlimit des Jobs abgebrochen zu werden (3. November 2026: fünf Stunden Laufzeit, Abbruch, kein Protokoll). 0 = ohne Grenze.
+const BUDGET_MS = (Number.parseFloat(process.env.KEEP_ALIVE_BUDGET_MIN ?? "") || 0) * 60_000;
+const startedAt = Date.now();
+const overBudget = () => BUDGET_MS > 0 && Date.now() - startedAt > BUDGET_MS;
 const MAX_ATTEMPTS = Math.max(1, Number.parseInt(process.env.KEEP_ALIVE_ATTEMPTS ?? "", 10) || 3);
 
 // Playwright's default headless Chromium sets navigator.webdriver = true and
@@ -821,6 +857,33 @@ await context.addInitScript(() => {
   Object.defineProperty(navigator, "webdriver", { get: () => undefined });
 });
 
+// Hänger der Cloud abfangen (gemessen 2026-11-04, nicht an unseren Demos, nicht an der Last): Streamlit 1.66 lädt über 100 kleine
+// Frontend-Chunks (/~/+/static/js/*.js, /-/build/assets/*.js), und jede siebte bis dritte Anfrage der Cloud-Weiterleitung bleibt 40 bis
+// 60 s hängen und endet mit HTTP 500 (dieselbe Datei kommt bei der nächsten Anfrage nach 0,3 s). Ein Browser wiederholt ein fehlgeschlagenes
+// Modul nicht: der App-Rahmen blieb leer, kein einziger Besuch war ein OK, die Läufe dauerten über 5 Stunden. Deshalb holt der Lauf diese
+// Dateien selbst: nach ASSET_TIMEOUT_MS abbrechen, bei Zeitablauf oder 5xx bis zu ASSET_TRIES-mal neu anfragen, erst dann das Ergebnis
+// an den Browser geben. WebSocket (die eigentliche Sitzung) und alle anderen Anfragen laufen unverändert.
+const ASSET_TIMEOUT_MS = 8_000;
+const ASSET_TRIES = 6;
+await context.route(/\/(~\/\+\/static|-\/build)\//, async (route) => {
+  let last = null;
+  for (let i = 0; i < ASSET_TRIES; i++) {
+    try {
+      const res = await route.fetch({ timeout: ASSET_TIMEOUT_MS });
+      if (res.status() < 500) return await route.fulfill({ response: res });
+      last = res;
+    } catch {
+      // Zeitablauf oder Verbindungsfehler: nächster Versuch (auch wenn die Seite inzwischen geschlossen wurde, dann endet die Schleife folgenlos)
+    }
+  }
+  try {
+    if (last) await route.fulfill({ response: last });
+    else await route.abort();
+  } catch {
+    // Seite schon geschlossen
+  }
+});
+
 // Letztes Ergebnis je Adresse. Die FAIL-Zeilen gehen auf stdout (nicht stderr): `portfolio_ops` liest stdout, und im Workflow
 // ist `2>&1` gesetzt, dort ändert sich nichts. Format: "FAIL <url>: skriptfehler: <erste Fehlerzeile>" bzw. "nicht-gefunden: ..." bzw.
 // bei unklaren Fällen die Meldung selbst (Zeitlimit o. ä.).
@@ -828,11 +891,17 @@ const resultByUrl = new Map(urls.map((url) => [url, { ok: false, kind: "unklar",
 let pending = [...urls];
 
 for (let attempt = 1; attempt <= MAX_ATTEMPTS && pending.length > 0; attempt++) {
+  if (attempt > 1 && overBudget()) {
+    console.log(`\nZeitbudget von ${BUDGET_MS / 60_000} Minuten aufgebraucht, keine weiteren Durchgänge für ${pending.length} Demo(s).`);
+    break;
+  }
   const concurrency = attempt === 1 ? CONCURRENCY : 1;
   if (attempt > 1) {
     console.log(`\nAttempt ${attempt}/${MAX_ATTEMPTS}, one at a time, for ${pending.length} demo(s): ${pending.join(", ")}`);
   }
-  const results = await mapWithConcurrency(pending, concurrency, (url) => visit(context, url));
+  const results = await mapWithConcurrency(pending, concurrency, (url) =>
+    overBudget() ? { ok: false, kind: "unklar", detail: "nicht besucht: Zeitbudget des Laufs aufgebraucht" } : visit(context, url),
+  );
   const stillFailing = [];
   pending.forEach((url, i) => {
     const result = results[i];
