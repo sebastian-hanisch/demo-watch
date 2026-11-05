@@ -1,0 +1,68 @@
+name: Wake sleeping demos
+
+# Liegt im oeffentlichen Repo sebastian-hanisch/demo-watch (dort sind Actions-Minuten kostenlos).
+# Die Cloud laesst Demos auch nach einem Besuch 12 bis 15 Stunden spaeter einschlafen (Messung 2026-11-05: ein Drittel der Demos, der Besuch des
+# grossen Laufs "Keep demos awake" setzt die Frist nicht verlaesslich zurueck). Dieser Lauf prueft deshalb alle 30 Minuten per Health-Abfrage
+# (weckt nichts, ~20 s), welche Demos schlafen, und besucht nur diese im Browser. Der grosse Lauf bleibt als Sicherheitsnetz alle 4 Stunden.
+on:
+  schedule:
+    # Minute 7 und 37 (nicht 0 und 30: dort lässt GitHub geplante Läufe eher aus)
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+# Eigene Gruppe: der grosse Lauf dauert Stunden und soll diesen nicht aufhalten. Ein noch laufender Lauf wird nicht abgebrochen,
+# der naechste wartet (GitHub behaelt von mehreren wartenden nur den neuesten).
+concurrency:
+  group: wake-sleepers
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Install Playwright package
+        run: npm install playwright@1.62.1
+      - name: Cache Chromium binary
+        id: cache-chromium
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-1.62.1
+      - name: Install Chromium
+        if: steps.cache-chromium.outputs.cache-hit != 'true'
+        run: npx playwright install chromium
+      - name: Wake sleeping demos
+        env:
+          KEEP_ALIVE_ONLY_ASLEEP: "1"
+          KEEP_ALIVE_URLS_FROM: https://sebastianhanisch.net/demos.html,https://sebastianhanisch.net/suche-index.json
+          # Nach 55 Minuten keine neuen Demos mehr beginnen (bei 300 schlafenden Demos reichen ~25 Minuten); der naechste Lauf macht weiter
+          KEEP_ALIVE_BUDGET_MIN: "55"
+        run: node .github/scripts/keep-alive.mjs 2>&1 | tee keep-alive.log
+
+      - name: Betroffene Demos für das Issue zusammenstellen
+        if: always()
+        run: |
+          if [ -f keep-alive.log ]; then
+            grep '^FAIL ' keep-alive.log | tac | awk '!seen[$2]++' | tac \
+              | sed -E 's#https://sebastianhanisch-##; s#\.streamlit\.app/##' | cut -c1-220 > keep-alive-details.txt || true
+          fi
+          touch keep-alive-details.txt
+
+      # Eigener Titel: sonst wuerde ein gruener Weck-Lauf das Issue des grossen Laufs schliessen (und umgekehrt)
+      - name: Bei Fehler Issue anlegen, bei Erfolg schließen
+        if: always()
+        uses: ./.github/actions/alert
+        with:
+          title: "Weck-Lauf: schlafende Demo nicht geweckt"
+          status: ${{ job.status }}
+          token: ${{ github.token }}
+          details-file: keep-alive-details.txt

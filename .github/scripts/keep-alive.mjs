@@ -598,7 +598,45 @@ if (from.length && !explicit.length) {
   if (found.size < 50) throw new Error(`KEEP_ALIVE_URLS_FROM: nur ${found.size} Adressen gefunden, das ist zu wenig`);
   listed = [...found];
 }
-const urls = explicit.length ? explicit : only.length ? listed.filter((u) => only.some((o) => u.includes(o))) : listed;
+const selected = explicit.length ? explicit : only.length ? listed.filter((u) => only.some((o) => u.includes(o))) : listed;
+// KEEP_ALIVE_ONLY_ASLEEP=1 besucht nur die Demos, die gerade schlafen (Workflow "Wake sleeping demos", alle 30 Minuten). Der Zustand kommt
+// aus dem Health-Endpunkt der Cloud, der nichts aufweckt (gemessen 2026-11-05): 200 mit "ok" = wach, 400 ohne Inhalt = schläft,
+// 404 = die Cloud kennt die Adresse nicht. Die Cloud hängt bei etwa jeder siebten Anfrage (Zeitablauf, HTTP 500): solche Antworten werden
+// bis zu dreimal wiederholt und gelten danach als unklar, die Demo wird dann vorsichtshalber besucht (ein Besuch einer wachen Demo schadet nicht).
+const onlyAsleep = process.env.KEEP_ALIVE_ONLY_ASLEEP === "1";
+async function healthState(url) {
+  for (let i = 0; i < 3; i++) {
+    try {
+      const res = await fetch(`${url}~/+/_stcore/health`, { signal: AbortSignal.timeout(15_000) });
+      if (res.status === 200) return "wach";
+      if (res.status === 400) return "schläft";
+      if (res.status === 404) return "unbekannt";
+    } catch {
+      // Zeitablauf oder Verbindungsfehler: nächster Versuch
+    }
+  }
+  return "unklar";
+}
+async function filterAsleep(all) {
+  const states = new Array(all.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: 12 }, async () => {
+      while (next < all.length) {
+        const i = next++;
+        states[i] = await healthState(all[i]);
+      }
+    }),
+  );
+  const count = (k) => states.filter((x) => x === k).length;
+  console.log(`Zustand von ${all.length} Demos: ${count("wach")} wach, ${count("schläft")} schlafen, ${count("unklar")} unklar, ${count("unbekannt")} unbekannt (404, nicht besucht).`);
+  return all.filter((_, i) => states[i] === "schläft" || states[i] === "unklar");
+}
+const urls = onlyAsleep ? await filterAsleep(selected) : selected;
+if (onlyAsleep && urls.length === 0) {
+  console.log("Keine schlafende Demo, nichts zu tun.");
+  process.exit(0);
+}
 // KEEP_ALIVE_JSON=<Datei> schreibt zusätzlich das Ergebnis je Adresse als JSON ([{url, klasse, detail}], klasse = ok | skriptfehler |
 // nicht-gefunden | unklar); `portfolio_ops deploy-check --browser` und die Tests lesen es. KEEP_ALIVE_SHELL_TIMEOUT_MS verkürzt nur das
 // Warten auf den App-Rahmen (Standard 150 s, ein Kaltstart braucht es); gedacht für lokale Prüfseiten, der Workflow setzt es nicht.
