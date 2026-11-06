@@ -5,7 +5,7 @@ name: Wake sleeping demos
 # "Keep demos awake" setzt die Frist nicht verlaesslich zurueck). Dieser Lauf prueft deshalb per Health-Abfrage (weckt nichts, ~20 s),
 # welche Demos schlafen, und besucht nur diese im Browser.
 # GitHub startet geplante Laeufe unzuverlaessig (2026-11-05: von 14:21 bis 21:02 UTC kein einziger, 352 Demos schliefen). Deshalb ist der Lauf
-# eine Schleife: ein Lauf arbeitet 4,5 Stunden lang alle 10 Minuten und startet am Ende den naechsten selbst (workflow_dispatch mit dem
+# eine Schleife: ein Lauf arbeitet 4,5 Stunden lang alle 5 Minuten (nach einer Welle alle 2) und startet am Ende den naechsten selbst (workflow_dispatch mit dem
 # GITHUB_TOKEN loest, anders als andere Ereignisse, einen Lauf aus). Der Zeitplan startet ihn stuendlich neu, falls die Kette einmal abreisst;
 # ein zweiter Lauf wartet dank concurrency, bis der laufende fertig ist. Anhalten: den Workflow in den Actions-Einstellungen deaktivieren
 # (ein einzelner Lauf ist nur abgebrochen, der Zeitplan startet ihn dann zur naechsten vollen Stunde neu).
@@ -48,7 +48,7 @@ jobs:
       - name: Install Chromium
         if: steps.cache-chromium.outputs.cache-hit != 'true'
         run: npx playwright install chromium
-      - name: Wake sleeping demos (alle 10 Minuten, 4,5 Stunden)
+      - name: Wake sleeping demos (alle 5 Minuten, 4,5 Stunden)
         id: loop
         shell: bash
         env:
@@ -56,6 +56,9 @@ jobs:
           KEEP_ALIVE_URLS_FROM: https://sebastianhanisch.net/demos.html,https://sebastianhanisch.net/suche-index.json
           # Je Durchgang nach 40 Minuten keine neuen Demos mehr beginnen (bei 350 schlafenden Demos reichen ~30 Minuten); der naechste Durchgang macht weiter
           KEEP_ALIVE_BUDGET_MIN: "40"
+          # Besuche im ersten Durchgang gleichzeitig (Standard 4): ein Kaltstart besteht fast nur aus Warten auf die Cloud. Lokal gemessen
+          # 2026-11-06: 11 Schlafende mit 10 gleichzeitigen Besuchen in 98 s, alle OK; mit 4 brauchte eine Welle von 150 etwa 40 Minuten.
+          KEEP_ALIVE_CONCURRENCY: "8"
         run: |
           END=$((SECONDS + 270 * 60))
           i=0
@@ -68,9 +71,11 @@ jobs:
             rc=${PIPESTATUS[0]}
             set -e
             [ "$rc" -eq 0 ] || echo "=== Durchgang $i endete mit Fehler (Exit $rc) ==="
-            # nach dem Durchgang noch Zeit fuer 10 Minuten Pause und einen weiteren Durchgang? sonst Schluss
-            [ $((SECONDS + 600)) -lt "$END" ] || break
-            sleep 600
+            # Pause: nach einem Durchgang mit Schlafenden nur 2 Minuten (die Welle ist meist noch nicht vorbei, und was zwischenzeitlich
+            # einschlaeft, wird gleich nachgeholt), sonst 5 Minuten. Reicht die Zeit nicht mehr fuer Pause und Durchgang, Schluss.
+            if grep -q "Keine schlafende Demo" keep-alive.log; then PAUSE=300; else PAUSE=120; fi
+            [ $((SECONDS + PAUSE)) -lt "$END" ] || break
+            sleep "$PAUSE"
           done
           # der Zustand des letzten Durchgangs entscheidet ueber das Issue (keep-alive.log wird je Durchgang neu geschrieben)
           exit "$rc"
