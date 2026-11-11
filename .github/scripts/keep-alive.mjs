@@ -671,7 +671,7 @@ const only = (process.env.KEEP_ALIVE_ONLY ?? "").split(",").filter(Boolean);
 // `portfolio_ops deploy-check --browser` right after a push wave. KEEP_ALIVE_ATTEMPTS lowers the retry passes (default 3).
 const explicit = (process.env.KEEP_ALIVE_URLS ?? "").split(",").filter(Boolean);
 // KEEP_ALIVE_URLS_FROM=<Seite>,<Seite> nimmt statt der Liste oben alle Demo-Adressen, die auf diesen Seiten stehen (im öffentlichen Repo
-// demo-watch: demos.html und suche-index.json der Website, dort stehen genau die Adressen von DEMO_URLS). So muss dort nichts nachgezogen werden.
+// demo-watch: suche-index.json der Website, dort stehen alle Demo-Adressen der Website; tools/check_consistency.py prüft das). So muss dort nichts nachgezogen werden.
 const from = (process.env.KEEP_ALIVE_URLS_FROM ?? "").split(",").filter(Boolean);
 let listed = DEMO_URLS;
 if (from.length && !explicit.length) {

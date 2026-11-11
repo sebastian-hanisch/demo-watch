@@ -48,8 +48,9 @@ jobs:
       - name: Visit every demo
         # tee behält das Protokoll für das Issue (bash läuft mit pipefail: ein Fehlschlag des Skripts bleibt einer)
         env:
-          # Die Adressen stehen auf diesen Seiten der Website (genau die Liste DEMO_URLS des Skripts)
-          KEEP_ALIVE_URLS_FROM: https://sebastianhanisch.net/demos.html,https://sebastianhanisch.net/suche-index.json
+          # Die Adressen stehen im Suchindex der Website, der jede Demo-Adresse enthält (tools/build_search_index.py; check_consistency.py prüft das).
+          # Eine eigene Seite als Quelle dazuzunehmen ist nicht nötig; 2026-11-10 schliefen sechs Grundlagendemos, weil sie weder dort noch auf demos.html standen
+          KEEP_ALIVE_URLS_FROM: https://sebastianhanisch.net/suche-index.json
           # Nach 240 Minuten keine neuen Demos mehr beginnen: der Lauf endet dann mit Protokoll und Issue, statt nach 300 Minuten vom Job-Limit abgebrochen zu werden
           KEEP_ALIVE_BUDGET_MIN: "240"
         run: node .github/scripts/keep-alive.mjs 2>&1 | tee keep-alive.log

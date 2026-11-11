@@ -53,7 +53,8 @@ jobs:
         shell: bash
         env:
           KEEP_ALIVE_ONLY_ASLEEP: "1"
-          KEEP_ALIVE_URLS_FROM: https://sebastianhanisch.net/demos.html,https://sebastianhanisch.net/suche-index.json
+          # Die Adressen stehen im Suchindex der Website, der jede Demo-Adresse enthält (tools/build_search_index.py; check_consistency.py prüft das)
+          KEEP_ALIVE_URLS_FROM: https://sebastianhanisch.net/suche-index.json
           # Je Durchgang nach 40 Minuten keine neuen Demos mehr beginnen (bei 350 schlafenden Demos reichen ~30 Minuten); der naechste Durchgang macht weiter
           KEEP_ALIVE_BUDGET_MIN: "40"
           # Besuche im ersten Durchgang gleichzeitig (Standard 4): ein Kaltstart besteht fast nur aus Warten auf die Cloud. Lokal gemessen
